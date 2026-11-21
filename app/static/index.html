@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据产品新鲜度核查</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --card: #fff; --line: #e3e8f0; --ink: #1f2937; --muted: #6b7280;
+    --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --info: #2563eb; --dup: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { background: #0f2743; color: #fff; padding: 14px 24px; display: flex;
+           align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  main { max-width: 1180px; margin: 20px auto; padding: 0 16px 60px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+            padding: 18px 20px; margin-bottom: 18px; }
+  h2 { font-size: 15px; margin: 0 0 12px; color: #0f2743; }
+  h2 .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 8px; }
+  select, input, textarea, button { font: inherit; }
+  select, input { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+  button { padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+           background: #0f2743; color: #fff; }
+  button.ghost { background: #eef2f7; color: var(--ink); border: 1px solid var(--line); }
+  button.danger { background: #b91c1c; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: #fafbfc; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+           color: #fff; }
+  .b-ok { background: var(--ok); } .b-late { background: var(--bad); }
+  .b-late_within_grace { background: var(--warn); } .b-missing { background: var(--bad); }
+  .b-pending { background: var(--info); } .b-duplicate { background: var(--dup); }
+  .b-superseded { background: #9ca3af; } .b-ready { background: var(--ok); }
+  .b-blocked { background: var(--bad); } .b-stale { background: #9ca3af; }
+  .b-valid { background: var(--ok); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  textarea { width: 100%; min-height: 110px; font-family: ui-monospace, monospace;
+             font-size: 12px; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .rcard { border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  .rcard h3 { margin: 0 0 8px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .kv { font-size: 13px; margin: 4px 0; }
+  .kv b { color: #0f2743; }
+  .block-msg { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+               border-radius: 6px; padding: 8px 10px; font-size: 12.5px; margin-top: 8px; }
+  .ok-msg { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+            border-radius: 6px; padding: 8px 10px; font-size: 12.5px; margin-top: 8px; }
+  .detail { margin-top: 10px; }
+  .detail table { font-size: 12px; }
+  #toast { position: fixed; top: 14px; right: 14px; padding: 10px 16px; border-radius: 8px;
+           color: #fff; background: #334155; display: none; z-index: 9; max-width: 420px;
+           font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+  #toast.err { background: var(--bad); }
+  #toast.ok { background: var(--ok); }
+  .ver { background: #1e3a5f; border-radius: 6px; padding: 3px 10px; font-size: 12px; }
+  details.upload { margin-bottom: 10px; }
+  details.upload summary { cursor: pointer; color: var(--info); font-size: 13px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>数据产品新鲜度核查</h1>
+  <span class="spacer"></span>
+  <label class="muted" style="color:#9fb3c8">目录</label>
+  <select id="catalogSelect"></select>
+  <span class="ver" id="verBadge">v-</span>
+  <button class="ghost" id="btnNewCatalog">新建目录</button>
+  <button id="btnDemo">加载演示数据</button>
+</header>
+<main>
+  <section>
+    <h2>① 遥测分区目录 <span class="hint">同一目录快照：每次上传/变更都会递增版本并使旧核查失效（时间均为 UTC）</span></h2>
+    <details class="upload">
+      <summary>上传分区批次（JSON 数组：partition_hour / planned_deadline / submitted_at / revision）</summary>
+      <textarea id="uploadJson" placeholder='[{"partition_hour":"2026-11-20T00:00:00Z","planned_deadline":"2026-11-20T01:00:00Z","submitted_at":"2026-11-20T00:55:00Z","revision":1}]'></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="btnUpload">上传分区</button>
+        <button class="danger" id="btnReset">清空分区</button>
+        <span class="muted" id="uploadMsg"></span>
+      </div>
+    </details>
+    <div style="overflow-x:auto">
+    <table id="partTable">
+      <thead><tr><th>分区小时</th><th>修订</th><th>计划截止</th><th>实际提交</th><th>状态</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>② 下游日报依赖 <span class="hint">分区偏移（天）+ 宽限分钟</span></h2>
+      <div class="row">
+        <input id="repName" placeholder="日报名称" style="width:130px">
+        <label class="muted">偏移</label><input id="repOffset" type="number" value="1" min="0" max="30" style="width:64px">
+        <label class="muted">宽限(分)</label><input id="repGrace" type="number" value="30" min="0" style="width:72px">
+        <button id="btnAddReport">添加</button>
+      </div>
+      <table id="repTable">
+        <thead><tr><th>名称</th><th>分区偏移(天)</th><th>宽限(分钟)</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>③ 运行核查 <span class="hint">按当前目录快照计算各日报可安全使用的最新水位</span></h2>
+      <div class="row">
+        <label class="muted">业务日期</label><input id="checkDate" type="date">
+        <label class="muted">截至时刻</label><input id="checkAsOf" type="datetime-local" step="60">
+        <button id="btnRunCheck">运行核查</button>
+      </div>
+      <div class="muted">业务日期 D 的日报使用分区日期 = D − 偏移 的 24 个小时分区。</div>
+    </section>
+  </div>
+
+  <section id="resultSection" style="display:none">
+    <h2>核查结果 <span class="hint" id="resultMeta"></span></h2>
+    <div class="cards" id="resultCards"></div>
+  </section>
+
+  <section>
+    <h2>历史核查 <span class="hint">目录或依赖更新后，旧结果自动标记为已失效</span></h2>
+    <table id="checkTable">
+      <thead><tr><th>#</th><th>业务日期</th><th>截至时刻</th><th>目录版本</th><th>就绪/阻断</th><th>有效性</th><th>运行时间</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentCatalog = null;
+
+const STATE_LABEL = { ok: "正常", late_within_grace: "宽限内迟到", late: "迟到超宽限",
+  missing: "缺失", pending: "截至前未提交", duplicate: "重复提交",
+  superseded: "已被新修订替代" };
+const REASON_LABEL = { MISSING: "缺失", PENDING: "截至前未提交",
+  DUPLICATE: "重复提交", LATE: "迟到超宽限" };
+
+function toast(msg, kind = "") {
+  const t = $("toast");
+  t.textContent = msg; t.className = kind; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 3500);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+function fmt(s) {
+  if (!s) return "—";
+  return s.replace("T", " ").replace("+00:00", "").replace(/:00$/, "") + " UTC";
+}
+function badge(cls, text) { return `<span class="badge b-${cls}">${text}</span>`; }
+
+// ---------- 目录 ----------
+async function loadCatalogs(selectId) {
+  const { catalogs } = await api("/api/catalogs");
+  const sel = $("catalogSelect");
+  sel.innerHTML = catalogs.map(c => `<option value="${c.id}">${c.name} (#${c.id})</option>`).join("");
+  if (!catalogs.length) { currentCatalog = null; renderAll(); return; }
+  const id = selectId || currentCatalog?.id || catalogs[0].id;
+  sel.value = id;
+  currentCatalog = catalogs.find(c => c.id == id) || catalogs[0];
+  renderAll();
+}
+
+async function refreshCatalog() {
+  if (!currentCatalog) return;
+  currentCatalog = await api(`/api/catalogs/${currentCatalog.id}`);
+  $("verBadge").textContent = "v" + currentCatalog.version;
+}
+
+function renderAll() {
+  $("verBadge").textContent = currentCatalog ? "v" + currentCatalog.version : "v-";
+  loadPartitions(); loadReports(); loadChecks();
+}
+
+// ---------- 分区 ----------
+async function loadPartitions() {
+  const tb = $("partTable").querySelector("tbody");
+  if (!currentCatalog) { tb.innerHTML = ""; return; }
+  const { partitions } = await api(`/api/catalogs/${currentCatalog.id}/partitions`);
+  tb.innerHTML = partitions.map(p => `<tr>
+    <td>${fmt(p.partition_hour)}</td><td>r${p.revision}</td>
+    <td>${fmt(p.planned_deadline)}</td><td>${fmt(p.submitted_at)}</td>
+    <td>${badge(p.status, STATE_LABEL[p.status] || p.status)}
+        ${p.flags.includes("late") && p.status !== "late" ? badge("late_within_grace", "迟到") : ""}</td>
+  </tr>`).join("") || `<tr><td colspan="5" class="muted">暂无分区，请上传或加载演示数据</td></tr>`;
+}
+
+// ---------- 日报 ----------
+async function loadReports() {
+  const tb = $("repTable").querySelector("tbody");
+  if (!currentCatalog) { tb.innerHTML = ""; return; }
+  const { reports } = await api(`/api/catalogs/${currentCatalog.id}/reports`);
+  tb.innerHTML = reports.map(r => `<tr>
+    <td>${r.name}</td><td>${r.offset_days}</td><td>${r.grace_minutes}</td>
+    <td><button class="ghost" onclick="delReport(${r.id})">删除</button></td>
+  </tr>`).join("") || `<tr><td colspan="4" class="muted">暂无日报依赖</td></tr>`;
+}
+
+async function delReport(id) {
+  try {
+    await api(`/api/catalogs/${currentCatalog.id}/reports/${id}`, { method: "DELETE" });
+    await refreshCatalog(); loadReports(); loadChecks();
+    toast("已删除日报，旧核查结果已失效", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- 核查 ----------
+function renderCheck(check) {
+  $("resultSection").style.display = "block";
+  $("resultMeta").textContent =
+    `核查 #${check.id} · 业务日期 ${check.business_date} · 截至 ${fmt(check.as_of)} · 目录版本 v${check.catalog_version}`;
+  $("resultCards").innerHTML = check.results.map((r, i) => {
+    const ready = r.status === "READY";
+    const counts = Object.entries(r.counts).filter(([, v]) => v > 0)
+      .map(([k, v]) => `${STATE_LABEL[k]}×${v}`).join("，");
+    return `<div class="rcard">
+      <h3>${r.report_name} ${badge(ready ? "ready" : "blocked", ready ? "就绪" : "阻断")}</h3>
+      <div class="kv">依赖窗口：<b>${fmt(r.window_start)} ~ ${fmt(r.window_end)}</b></div>
+      <div class="kv">偏移 ${r.offset_days} 天 · 宽限 ${r.grace_minutes} 分钟</div>
+      <div class="kv">安全水位：<b>${r.watermark_hour ? fmt(r.watermark_hour) : "无（起点即阻断）"}</b></div>
+      <div class="kv muted">${counts}</div>
+      ${ready
+        ? `<div class="ok-msg">全部 24 个分区可安全使用</div>`
+        : `<div class="block-msg">最早阻断：${fmt(r.block_hour)} · ${REASON_LABEL[r.block_reason] || ""}<br>${r.block_message}</div>`}
+      <div class="detail">
+        <button class="ghost" onclick="toggleDetail(${i})">逐小时明细</button>
+        <div id="detail-${i}" style="display:none;overflow-x:auto">
+          <table><thead><tr><th>分区</th><th>状态</th><th>修订</th><th>实际提交</th><th>计划截止</th><th>说明</th></tr></thead>
+          <tbody>${r.details.map(d => `<tr>
+            <td>${fmt(d.hour)}</td>
+            <td>${badge(d.state, STATE_LABEL[d.state])}${d.superseded_count ? ` <span class="muted">+${d.superseded_count}被替代</span>` : ""}</td>
+            <td>${d.revision != null ? "r" + d.revision : "—"}</td>
+            <td>${fmt(d.submitted_at)}</td><td>${fmt(d.planned_deadline)}</td>
+            <td class="muted">${d.message || ""}</td>
+          </tr>`).join("")}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+  window._lastCheck = check;
+}
+
+function toggleDetail(i) {
+  const el = $(`detail-${i}`);
+  el.style.display = el.style.display === "none" ? "block" : "none";
+}
+
+async function runCheck() {
+  if (!currentCatalog) return toast("请先选择目录", "err");
+  const date = $("checkDate").value;
+  const asOfLocal = $("checkAsOf").value;
+  if (!date || !asOfLocal) return toast("请填写业务日期与截至时刻", "err");
+  try {
+    const check = await api(`/api/catalogs/${currentCatalog.id}/checks`, {
+      method: "POST",
+      body: JSON.stringify({ business_date: date, as_of: new Date(asOfLocal).toISOString() }),
+    });
+    renderCheck(check); loadChecks();
+    toast("核查完成", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- 历史 ----------
+async function loadChecks() {
+  const tb = $("checkTable").querySelector("tbody");
+  if (!currentCatalog) { tb.innerHTML = ""; return; }
+  const { checks } = await api(`/api/catalogs/${currentCatalog.id}/checks`);
+  tb.innerHTML = checks.map(c => `<tr>
+    <td>#${c.id}</td><td>${c.business_date}</td><td>${fmt(c.as_of)}</td><td>v${c.catalog_version}</td>
+    <td>${c.summary.READY || 0} / ${c.summary.BLOCKED || 0}</td>
+    <td>${c.stale ? badge("stale", "已失效") : badge("valid", "有效")}</td>
+    <td>${fmt(c.created_at)}</td>
+    <td><button class="ghost" onclick="viewCheck(${c.id})">查看</button></td>
+  </tr>`).join("") || `<tr><td colspan="8" class="muted">暂无核查记录</td></tr>`;
+}
+
+async function viewCheck(id) {
+  try {
+    const check = await api(`/api/checks/${id}`);
+    renderCheck(check);
+    if (check.stale) toast("注意：该核查基于旧目录快照，结果已失效", "err");
+    $("resultSection").scrollIntoView({ behavior: "smooth" });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- 事件 ----------
+$("catalogSelect").addEventListener("change", (e) => loadCatalogs(Number(e.target.value)));
+
+$("btnNewCatalog").addEventListener("click", async () => {
+  const name = prompt("目录名称：", `目录-${new Date().toISOString().slice(0, 10)}`);
+  if (!name) return;
+  try {
+    const c = await api("/api/catalogs", { method: "POST", body: JSON.stringify({ name }) });
+    await loadCatalogs(c.id);
+    toast("已创建目录", "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("btnUpload").addEventListener("click", async () => {
+  if (!currentCatalog) return toast("请先选择目录", "err");
+  let arr;
+  try { arr = JSON.parse($("uploadJson").value); }
+  catch (e) { return toast("JSON 解析失败：" + e.message, "err"); }
+  if (!Array.isArray(arr) || !arr.length) return toast("请提供非空 JSON 数组", "err");
+  try {
+    const r = await api(`/api/catalogs/${currentCatalog.id}/partitions`, {
+      method: "POST", body: JSON.stringify({ partitions: arr }),
+    });
+    $("uploadMsg").textContent = `已写入 ${r.inserted} 条，目录版本 → v${r.catalog_version}，旧核查已失效`;
+    await refreshCatalog(); loadPartitions(); loadChecks();
+    toast("上传成功", "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("btnReset").addEventListener("click", async () => {
+  if (!currentCatalog || !confirm("清空当前目录全部分区？")) return;
+  try {
+    const r = await api(`/api/catalogs/${currentCatalog.id}/reset`, { method: "POST" });
+    await refreshCatalog(); loadPartitions(); loadChecks();
+    toast(`已清空 ${r.deleted} 条分区`, "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("btnAddReport").addEventListener("click", async () => {
+  if (!currentCatalog) return toast("请先选择目录", "err");
+  const name = $("repName").value.trim();
+  if (!name) return toast("请填写日报名称", "err");
+  try {
+    await api(`/api/catalogs/${currentCatalog.id}/reports`, {
+      method: "POST",
+      body: JSON.stringify({ name, offset_days: Number($("repOffset").value || 0),
+                             grace_minutes: Number($("repGrace").value || 0) }),
+    });
+    $("repName").value = "";
+    await refreshCatalog(); loadReports(); loadChecks();
+    toast("已添加日报依赖，旧核查结果已失效", "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("btnRunCheck").addEventListener("click", runCheck);
+
+$("btnDemo").addEventListener("click", async () => {
+  try {
+    const d = await api("/api/demo", { method: "POST" });
+    await loadCatalogs(d.catalog_id);
+    $("checkDate").value = d.business_date;
+    // d.as_of 为 UTC；datetime-local 需要本地时间字符串，转换以保留同一时刻
+    const asOf = new Date(d.as_of);
+    $("checkAsOf").value = new Date(asOf.getTime() - asOf.getTimezoneOffset() * 60000)
+      .toISOString().slice(0, 16);
+    await runCheck();
+    toast("演示数据已加载并完成核查", "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+
+// ---------- 初始化 ----------
+(function init() {
+  const now = new Date();
+  $("checkDate").value = now.toISOString().slice(0, 10);
+  $("checkAsOf").value = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16);
+  loadCatalogs().catch(e => toast(e.message, "err"));
+})();
+</script>
+</body>
+</html>
