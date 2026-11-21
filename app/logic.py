@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 UTC = timezone.utc
 
@@ -159,6 +159,99 @@ def evaluate_report(
         "block_message": block_message,
         "counts": counts,
         "details": details,
+    }
+
+
+# ---------- 历史分析 ----------
+
+def daterange(start: date, end: date) -> list[date]:
+    """闭区间 [start, end] 内的全部日期。"""
+    if end < start:
+        return []
+    days = (end - start).days
+    return [start + timedelta(days=i) for i in range(days + 1)]
+
+
+def latest_checks_by_day(checks: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """每个业务日取截至时刻（as_of）最晚的核查；时刻相同取最后保存的一次（id 最大）。
+
+    checks 元素需含 id / business_date / as_of（ISO8601 UTC 字符串，可字典序比较）。
+    """
+    chosen: dict[str, dict[str, Any]] = {}
+    for c in checks:
+        day = c["business_date"]
+        cur = chosen.get(day)
+        if cur is None or (c["as_of"], c["id"]) > (cur["as_of"], cur["id"]):
+            chosen[day] = dict(c)
+    return chosen
+
+
+def analyze_blocking(
+    days: Sequence[date],
+    chosen_checks: Mapping[str, Mapping[str, Any]],
+    results_by_check: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """按"首个阻断原因"统计各业务日。
+
+    chosen_checks: business_date -> 当日入选核查（见 latest_checks_by_day）
+    results_by_check: check_id -> 该核查中目标身份（或未归属）的 check_results 行
+
+    当日入选核查中目标身份若为 READY，则较早的阻断不计入（本就不在入选核查内）；
+    BLOCKED 时按 block_reason 计 1 天；无核查或无该身份结果记为对应空状态。
+    返回原因计数（含全部四类原因，便于前端固定顺序展示）与逐日明细。
+    """
+    counts = {reason: 0 for reason in REASON_LABELS}
+    day_rows: list[dict[str, Any]] = []
+    totals = {"blocked_days": 0, "ready_days": 0, "no_check_days": 0, "no_record_days": 0}
+
+    for day in days:
+        day_iso = day.isoformat()
+        check = chosen_checks.get(day_iso)
+        row: dict[str, Any] = {
+            "business_date": day_iso,
+            "status": None, "block_reason": None, "check_id": None,
+            "as_of": None, "stale": None, "catalog_version": None,
+            "report_name": None,
+        }
+        if check is None:
+            row["status"] = "NO_CHECK"
+            totals["no_check_days"] += 1
+        else:
+            results = list(results_by_check.get(check["id"], []))
+            row["check_id"] = check["id"]
+            row["as_of"] = check["as_of"]
+            row["stale"] = check.get("stale")
+            row["catalog_version"] = check.get("catalog_version")
+            if not results:
+                row["status"] = "NO_RECORD"
+                totals["no_record_days"] += 1
+                row["report_name"] = None
+            else:
+                # 未归属身份下同一核查可能保留多条无法确认身份的结果：取首个阻断；
+                # 若全部就绪则取第一条作为当日代表。
+                blocked = next((r for r in results if r["status"] == "BLOCKED"), None)
+                if blocked is not None:
+                    rep = blocked
+                    row["status"] = "BLOCKED"
+                    row["block_reason"] = rep["block_reason"]
+                    counts[rep["block_reason"]] += 1
+                    totals["blocked_days"] += 1
+                else:
+                    rep = results[0]
+                    row["status"] = "READY"
+                    totals["ready_days"] += 1
+                row["report_name"] = rep["report_name"]
+        day_rows.append(row)
+
+    reason_summary = [
+        {"reason": reason, "label": REASON_LABELS[reason], "days": counts[reason]}
+        for reason in (MISSING, PENDING, DUPLICATE, LATE)
+    ]
+    return {
+        "reason_counts": counts,
+        "reason_summary": reason_summary,
+        "days": day_rows,
+        "totals": totals,
     }
 
 

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>历史阻断分析 · 数据产品新鲜度核查</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --card: #fff; --line: #e3e8f0; --ink: #1f2937; --muted: #6b7280;
+    --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --info: #2563eb; --dup: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { background: #0f2743; color: #fff; padding: 14px 24px; display: flex;
+           align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header a { color: #9fb3c8; font-size: 13px; text-decoration: none; }
+  header a:hover { color: #fff; }
+  main { max-width: 1180px; margin: 20px auto; padding: 0 16px 60px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+            padding: 18px 20px; margin-bottom: 18px; }
+  h2 { font-size: 15px; margin: 0 0 12px; color: #0f2743; }
+  h2 .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 8px; }
+  select, input, button { font: inherit; }
+  select, input { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+  button { padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+           background: #0f2743; color: #fff; }
+  button.ghost { background: #eef2f7; color: var(--ink); border: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: #fafbfc; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+           color: #fff; }
+  .b-ok, .b-ready { background: var(--ok); }
+  .b-MISSING { background: var(--bad); } .b-PENDING { background: var(--info); }
+  .b-DUPLICATE { background: var(--dup); } .b-LATE { background: var(--warn); }
+  .b-stale { background: #9ca3af; } .b-valid { background: var(--ok); }
+  .b-NO_CHECK, .b-NO_RECORD { background: #9ca3af; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                  gap: 12px; margin-bottom: 14px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .stat .num { font-size: 26px; font-weight: 700; color: #0f2743; }
+  .stat .lab { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .stat.blocked .num { color: var(--bad); }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 13px; }
+  .bar-row .name { width: 110px; }
+  .bar-row .bar { height: 18px; border-radius: 4px; min-width: 2px; }
+  .bar-row .cnt { width: 60px; color: var(--muted); }
+  .link-btn { background: none; border: none; color: var(--info); padding: 0;
+              cursor: pointer; text-decoration: underline; font-size: 13px; }
+  /* 详情弹窗 */
+  .modal-mask { position: fixed; inset: 0; background: rgba(15,39,67,.45); display: none;
+                z-index: 20; align-items: flex-start; justify-content: center; padding: 40px 16px; }
+  .modal-mask.open { display: flex; }
+  .modal { background: #fff; border-radius: 10px; max-width: 1080px; width: 100%;
+           max-height: 82vh; overflow: auto; padding: 18px 22px; }
+  .modal h3 { margin: 0 0 10px; font-size: 15px; display: flex; gap: 10px; align-items: center; }
+  .modal .close { margin-left: auto; }
+  .kv { font-size: 13px; margin: 4px 0; }
+  .block-msg { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+               border-radius: 6px; padding: 8px 10px; font-size: 12.5px; margin-top: 8px; }
+  .ok-msg { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+            border-radius: 6px; padding: 8px 10px; font-size: 12.5px; margin-top: 8px; }
+  #toast { position: fixed; top: 14px; right: 14px; padding: 10px 16px; border-radius: 8px;
+           color: #fff; background: #334155; display: none; z-index: 30; max-width: 420px;
+           font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+  #toast.err { background: var(--bad); }
+  #toast.ok { background: var(--ok); }
+  .reason-cell .badge { margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>历史阻断分析</h1>
+  <span class="spacer"></span>
+  <a href="/">← 返回核查工作台</a>
+</header>
+<main>
+  <section>
+    <h2>查询条件 <span class="hint">每个业务日取截至时刻最晚的已保存核查；时刻相同取最后保存的一次；当天已就绪则较早阻断不计入</span></h2>
+    <div class="row">
+      <label class="muted">目录</label>
+      <select id="catalogSelect" style="min-width:200px"></select>
+      <label class="muted">日报身份</label>
+      <select id="reportSelect" style="min-width:220px"></select>
+      <label class="muted">业务日期 自</label>
+      <input id="startDate" type="date">
+      <label class="muted">至</label>
+      <input id="endDate" type="date">
+      <button id="btnRun">分析</button>
+    </div>
+    <div class="muted">
+      日报按身份归档：删除后同名重建是不同身份，分开统计；无法确认身份的旧记录单列为
+      “未归属”。目录更新后的旧核查仍作为当时记录参与（会标注“已失效”）。
+    </div>
+  </section>
+
+  <section id="resultSection" style="display:none">
+    <h2>统计结果 <span class="hint" id="resultMeta"></span></h2>
+    <div class="summary-grid" id="summaryGrid"></div>
+    <h2 style="margin-top:6px">按首个阻断原因统计天数</h2>
+    <div id="reasonBars"></div>
+  </section>
+
+  <section id="daysSection" style="display:none">
+    <h2>逐日明细 <span class="hint">点击“查看原核查”可展开当时保存的完整核查</span></h2>
+    <div style="overflow-x:auto">
+    <table id="daysTable">
+      <thead><tr>
+        <th>业务日期</th><th>状态</th><th>首个阻断原因</th><th>入选核查</th>
+        <th>截至时刻</th><th>快照名称</th><th>有效性</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </section>
+</main>
+
+<div class="modal-mask" id="modalMask">
+  <div class="modal">
+    <h3>
+      <span id="modalTitle">核查详情</span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="ghost close" id="modalClose">关闭</button>
+    </h3>
+    <div id="modalBody"></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let catalogs = [];
+let currentCatalogId = null;
+
+const REASON_LABEL = { MISSING: "缺失", PENDING: "截至前未提交",
+  DUPLICATE: "重复提交", LATE: "迟到超宽限" };
+const REASON_COLOR = { MISSING: "#dc2626", PENDING: "#2563eb",
+  DUPLICATE: "#7c3aed", LATE: "#d97706" };
+const STATE_LABEL = { ok: "正常", late_within_grace: "宽限内迟到", late: "迟到超宽限",
+  missing: "缺失", pending: "截至前未提交", duplicate: "重复提交",
+  superseded: "已被新修订替代" };
+const DAY_STATUS = { BLOCKED: "阻断", READY: "就绪",
+  NO_CHECK: "当日无核查", NO_RECORD: "核查中无该日报" };
+
+function toast(msg, kind = "") {
+  const t = $("toast");
+  t.textContent = msg; t.className = kind; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 3500);
+}
+
+async function api(path) {
+  const res = await fetch(path);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+function fmt(s) {
+  if (!s) return "—";
+  return s.replace("T", " ").replace("+00:00", "").replace(/:00$/, "") + " UTC";
+}
+function badge(cls, text) { return `<span class="badge b-${cls}">${text}</span>`; }
+
+// ---------- 目录与日报身份 ----------
+async function loadCatalogs() {
+  const data = await api("/api/catalogs");
+  catalogs = data.catalogs;
+  const sel = $("catalogSelect");
+  sel.innerHTML = catalogs.map(c =>
+    `<option value="${c.id}">${c.name} (#${c.id})</option>`).join("");
+  if (!catalogs.length) {
+    currentCatalogId = null;
+    $("reportSelect").innerHTML = "";
+    return;
+  }
+  const prev = currentCatalogId;
+  currentCatalogId = catalogs.some(c => c.id === prev) ? prev : catalogs[0].id;
+  sel.value = currentCatalogId;
+  await loadIdentities();
+}
+
+async function loadIdentities() {
+  if (currentCatalogId == null) return;
+  const data = await api(`/api/catalogs/${currentCatalogId}/report-identities`);
+  const opts = data.identities.map(r => {
+    const tag = r.deleted_at ? "（已删除）" : "";
+    return `<option value="r:${r.id}">${r.name} #${r.id}${tag}</option>`;
+  });
+  if (data.unassigned_available) {
+    opts.push(`<option value="unassigned">未归属（无法确认日报身份的旧记录）</option>`);
+  }
+  const sel = $("reportSelect");
+  sel.innerHTML = opts.join("") ||
+    `<option value="">（该目录暂无日报身份）</option>`;
+}
+
+$("catalogSelect").addEventListener("change", async (e) => {
+  currentCatalogId = Number(e.target.value);
+  await loadIdentities();
+});
+
+// ---------- 分析 ----------
+async function runAnalysis() {
+  if (currentCatalogId == null) return toast("请先选择目录", "err");
+  const start = $("startDate").value;
+  const end = $("endDate").value;
+  if (!start || !end) return toast("请选择业务日期范围", "err");
+  const target = $("reportSelect").value;
+  if (!target) return toast("该目录下没有可选的日报身份或未归属记录", "err");
+
+  const params = new URLSearchParams({ start_date: start, end_date: end });
+  if (target === "unassigned") params.set("unassigned", "true");
+  else params.set("report_id", target.split(":")[1]);
+
+  try {
+    const data = await api(
+      `/api/catalogs/${currentCatalogId}/analysis?${params.toString()}`);
+    renderAnalysis(data);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function renderAnalysis(data) {
+  $("resultSection").style.display = "block";
+  $("daysSection").style.display = "block";
+  const targetLabel = data.unassigned
+    ? "未归属"
+    : `${data.report_name} #${data.report_id}${data.report_deleted ? "（已删除）" : ""}`;
+  $("resultMeta").textContent =
+    `${targetLabel} · ${data.start_date} ~ ${data.end_date} · 目录当前 v${data.current_version}`;
+
+  const t = data.totals;
+  $("summaryGrid").innerHTML = [
+    ["blocked", t.blocked_days, "阻断天数"],
+    ["ready", t.ready_days, "就绪天数"],
+    ["no", t.no_check_days + t.no_record_days, "无核查/无记录天数"],
+    ["", data.days.length, "区间总天数"],
+  ].map(([cls, num, lab]) =>
+    `<div class="stat ${cls}"><div class="num">${num}</div><div class="lab">${lab}</div></div>`
+  ).join("");
+
+  const maxDays = Math.max(1, ...data.reason_summary.map(r => r.days));
+  $("reasonBars").innerHTML = data.reason_summary.map(r => {
+    const w = Math.round((r.days / maxDays) * 360);
+    return `<div class="bar-row">
+      <span class="name">${badge(r.reason, r.label)}</span>
+      <span class="bar" style="width:${w}px;background:${REASON_COLOR[r.reason]}"></span>
+      <span class="cnt">${r.days} 天</span>
+    </div>`;
+  }).join("");
+
+  $("daysTable").querySelector("tbody").innerHTML = data.days.map(d => {
+    let reasonCell = "—";
+    if (d.status === "BLOCKED") {
+      reasonCell = `<span class="reason-cell">${badge(d.block_reason,
+        REASON_LABEL[d.block_reason] || d.block_reason)}</span>`;
+    }
+    const validCell = d.check_id == null ? "—"
+      : (d.stale ? badge("stale", "已失效") : badge("valid", "有效"));
+    const viewBtn = d.check_id == null ? "—"
+      : `<button class="link-btn" onclick="viewCheck(${d.check_id})">查看原核查</button>`;
+    return `<tr>
+      <td>${d.business_date}</td>
+      <td>${badge(d.status, DAY_STATUS[d.status] || d.status)}</td>
+      <td>${reasonCell}</td>
+      <td>${d.check_id == null ? "—" : "#" + d.check_id}</td>
+      <td>${fmt(d.as_of)}</td>
+      <td>${d.report_name || "—"}</td>
+      <td>${validCell}</td>
+      <td>${viewBtn}</td>
+    </tr>`;
+  }).join("");
+}
+
+// ---------- 原核查详情弹窗 ----------
+async function viewCheck(checkId) {
+  try {
+    const check = await api(`/api/checks/${checkId}`);
+    $("modalTitle").textContent =
+      `核查 #${check.id} · 业务日期 ${check.business_date} · 截至 ${fmt(check.as_of)}`;
+    $("modalBody").innerHTML = check.results.map((r, i) => {
+      const ready = r.status === "READY";
+      return `<div style="border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px">
+        <div class="kv"><b>${r.report_name}</b>
+          ${badge(ready ? "ready" : "blocked", ready ? "就绪" : "阻断")}
+          <span class="muted">（身份 #${r.report_id == null ? "未归属" : r.report_id}）</span>
+        </div>
+        <div class="kv">窗口 ${fmt(r.window_start)} ~ ${fmt(r.window_end)}
+          · 偏移 ${r.offset_days} 天 · 宽限 ${r.grace_minutes} 分钟</div>
+        <div class="kv">安全水位：${r.watermark_hour ? fmt(r.watermark_hour) : "无（起点即阻断）"}</div>
+        ${ready
+          ? `<div class="ok-msg">全部 24 个分区可安全使用</div>`
+          : `<div class="block-msg">最早阻断：${fmt(r.block_hour)} ·
+             ${REASON_LABEL[r.block_reason] || ""}<br>${r.block_message}</div>`}
+        <details style="margin-top:8px">
+          <summary class="muted" style="cursor:pointer">逐小时明细（24 个分区）</summary>
+          <table style="margin-top:8px;font-size:12px">
+            <thead><tr><th>分区</th><th>状态</th><th>修订</th><th>实际提交</th><th>说明</th></tr></thead>
+            <tbody>${r.details.map(d => `<tr>
+              <td>${fmt(d.hour)}</td>
+              <td>${badge(d.state, STATE_LABEL[d.state] || d.state)}</td>
+              <td>${d.revision != null ? "r" + d.revision : "—"}</td>
+              <td>${fmt(d.submitted_at)}</td>
+              <td class="muted">${d.message || ""}</td>
+            </tr>`).join("")}</tbody>
+          </table>
+        </details>
+      </div>`;
+    }).join("");
+    $("modalMask").classList.add("open");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+$("modalClose").addEventListener("click", () => $("modalMask").classList.remove("open"));
+$("modalMask").addEventListener("click", (e) => {
+  if (e.target === $("modalMask")) $("modalMask").classList.remove("open");
+});
+$("btnRun").addEventListener("click", runAnalysis);
+
+// ---------- 初始化：默认近 7 天 ----------
+(function init() {
+  const today = new Date();
+  const weekAgo = new Date(today.getTime() - 6 * 86400000);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  $("startDate").value = iso(weekAgo);
+  $("endDate").value = iso(today);
+  loadCatalogs().catch(e => toast(e.message, "err"));
+})();
+</script>
+</body>
+</html>

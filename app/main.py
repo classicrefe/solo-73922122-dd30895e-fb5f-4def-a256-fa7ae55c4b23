@@ -104,6 +104,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/analysis", include_in_schema=False)
+    def analysis_page():
+        return FileResponse(STATIC_DIR / "analysis.html")
+
     # ----- 目录 -----
 
     @app.post("/api/catalogs", status_code=201)
@@ -183,17 +187,41 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def list_reports(catalog_id: int, conn=Depends(get_db)):
         get_catalog_or_404(conn, catalog_id)
         rows = conn.execute(
-            "SELECT * FROM reports WHERE catalog_id = ? ORDER BY id", (catalog_id,)
+            "SELECT * FROM reports WHERE catalog_id = ? AND deleted_at IS NULL ORDER BY id",
+            (catalog_id,),
         ).fetchall()
         return {"reports": [dict(r) for r in rows]}
+
+    @app.get("/api/catalogs/{catalog_id}/report-identities")
+    def list_report_identities(catalog_id: int, conn=Depends(get_db)):
+        """历史分析用：返回目录下全部日报身份，含已删除者（删后同名重建是不同身份）。"""
+        get_catalog_or_404(conn, catalog_id)
+        rows = conn.execute(
+            "SELECT id, name, offset_days, grace_minutes, created_at, deleted_at"
+            " FROM reports WHERE catalog_id = ? ORDER BY id",
+            (catalog_id,),
+        ).fetchall()
+        identities = [dict(r) for r in rows]
+        has_orphan = conn.execute(
+            "SELECT 1 FROM checks c JOIN check_results r ON r.check_id = c.id"
+            " WHERE c.catalog_id = ? AND r.report_id IS NULL LIMIT 1",
+            (catalog_id,),
+        ).fetchone()
+        return {
+            "identities": identities,
+            "unassigned_available": has_orphan is not None,
+        }
 
     @app.delete("/api/catalogs/{catalog_id}/reports/{report_id}")
     def delete_report(catalog_id: int, report_id: int, conn=Depends(get_db)):
         get_catalog_or_404(conn, catalog_id)
         cur = conn.execute(
-            "DELETE FROM reports WHERE id = ? AND catalog_id = ?", (report_id, catalog_id))
+            "UPDATE reports SET deleted_at = ? WHERE id = ? AND catalog_id = ?"
+            " AND deleted_at IS NULL",
+            (logic.iso(logic.now()), report_id, catalog_id))
         if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail=f"日报 {report_id} 不存在")
+            raise HTTPException(status_code=404, detail=f"日报 {report_id} 不存在或已删除")
+        # 软删除保留身份供历史归档；依赖集合变化仍使旧核查失效
         bump_version(conn, catalog_id)
         conn.commit()
         return {"deleted": report_id}
@@ -211,7 +239,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
         as_of = parse_dt_or_422(body.as_of, "as_of")
 
         reports = conn.execute(
-            "SELECT * FROM reports WHERE catalog_id = ? ORDER BY id", (catalog_id,)
+            "SELECT * FROM reports WHERE catalog_id = ? AND deleted_at IS NULL ORDER BY id",
+            (catalog_id,),
         ).fetchall()
         part_rows = conn.execute(
             "SELECT * FROM partitions WHERE catalog_id = ?", (catalog_id,)
@@ -234,11 +263,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
             window = logic.window_hours(business_date, rep["offset_days"])
             res = logic.evaluate_report(window, by_hour, as_of, rep["grace_minutes"])
             conn.execute(
-                "INSERT INTO check_results(check_id, report_name, offset_days, grace_minutes,"
-                " window_start, window_end, watermark_hour, status, block_hour, block_reason,"
-                " block_message, counts_json, detail_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (check_id, rep["name"], rep["offset_days"], rep["grace_minutes"],
+                "INSERT INTO check_results(check_id, report_id, report_name, offset_days,"
+                " grace_minutes, window_start, window_end, watermark_hour, status,"
+                " block_hour, block_reason, block_message, counts_json, detail_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (check_id, rep["id"], rep["name"], rep["offset_days"], rep["grace_minutes"],
                  res["window_start"], res["window_end"], res["watermark_hour"],
                  res["status"], res["block_hour"], res["block_reason"],
                  res["block_message"], json.dumps(res["counts"], ensure_ascii=False),
@@ -289,6 +318,88 @@ def create_app(db_path: str | None = None) -> FastAPI:
             results.append(d)
         return {**check_to_dict(row, ver), "results": results}
 
+    # ----- 历史分析 -----
+
+    @app.get("/api/catalogs/{catalog_id}/analysis")
+    def blocking_analysis(
+        catalog_id: int,
+        start_date: str,
+        end_date: str,
+        report_id: int | None = None,
+        unassigned: bool = False,
+        conn=Depends(get_db),
+    ):
+        """一周内（任意业务日期闭区间）按首个阻断原因统计阻断天数。
+
+        每个业务日只取截至时刻最晚的已保存核查；时刻相同取最后保存的一次。
+        当天入选核查中该日报身份若已就绪，则较早的阻断不计入。
+        report_id 与 unassigned 二选一；unassigned 统计无法确认日报身份的旧记录。
+        旧核查即使已失效（stale）仍作为当时的记录参与统计。
+        """
+        catalog = get_catalog_or_404(conn, catalog_id)
+        try:
+            start = date.fromisoformat(start_date)
+            end = date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(status_code=422,
+                                detail="start_date/end_date 应为 YYYY-MM-DD")
+        if end < start:
+            raise HTTPException(status_code=422, detail="end_date 不能早于 start_date")
+        if report_id is None and not unassigned:
+            raise HTTPException(status_code=422,
+                                detail="必须指定 report_id 或 unassigned=true")
+        if report_id is not None and unassigned:
+            raise HTTPException(status_code=422,
+                                detail="report_id 与 unassigned 不能同时指定")
+        if report_id is not None:
+            rep = conn.execute(
+                "SELECT * FROM reports WHERE id = ? AND catalog_id = ?",
+                (report_id, catalog_id)).fetchone()
+            if rep is None:
+                raise HTTPException(status_code=404,
+                                    detail=f"日报身份 {report_id} 不存在于目录 {catalog_id}")
+            report_name, report_deleted_at = rep["name"], rep["deleted_at"]
+        else:
+            report_name, report_deleted_at = "未归属", None
+
+        check_rows = conn.execute(
+            "SELECT * FROM checks WHERE catalog_id = ? AND business_date BETWEEN ? AND ?"
+            " ORDER BY id",
+            (catalog_id, start.isoformat(), end.isoformat()),
+        ).fetchall()
+        current_ver = catalog["version"]
+        checks_payload = [check_to_dict(r, current_ver) for r in check_rows]
+        chosen = logic.latest_checks_by_day(checks_payload)
+        chosen_ids = [c["id"] for c in chosen.values()]
+
+        results_by_check: dict[int, list] = {cid: [] for cid in chosen_ids}
+        if chosen_ids:
+            placeholders = ",".join("?" * len(chosen_ids))
+            if unassigned:
+                sql = (f"SELECT * FROM check_results WHERE check_id IN ({placeholders})"
+                       " AND report_id IS NULL ORDER BY id")
+                params = tuple(chosen_ids)
+            else:
+                sql = (f"SELECT * FROM check_results WHERE check_id IN ({placeholders})"
+                       " AND report_id = ? ORDER BY id")
+                params = tuple(chosen_ids) + (report_id,)
+            for rr in conn.execute(sql, params).fetchall():
+                results_by_check.setdefault(rr["check_id"], []).append(dict(rr))
+
+        analysis = logic.analyze_blocking(
+            logic.daterange(start, end), chosen, results_by_check)
+        return {
+            "catalog_id": catalog_id,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "report_id": report_id,
+            "unassigned": unassigned,
+            "report_name": report_name,
+            "report_deleted": report_deleted_at is not None,
+            "current_version": current_ver,
+            **analysis,
+        }
+
     # ----- 演示数据 -----
 
     @app.post("/api/demo", status_code=201)
@@ -304,6 +415,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
             catalog_id = cur.lastrowid
         else:
             catalog_id = row["id"]
+        conn.execute(
+            "DELETE FROM check_results WHERE check_id IN"
+            " (SELECT id FROM checks WHERE catalog_id = ?)", (catalog_id,))
+        conn.execute("DELETE FROM checks WHERE catalog_id = ?", (catalog_id,))
         conn.execute("DELETE FROM partitions WHERE catalog_id = ?", (catalog_id,))
         conn.execute("DELETE FROM reports WHERE catalog_id = ?", (catalog_id,))
 
